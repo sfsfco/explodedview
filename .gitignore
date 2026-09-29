@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+prompt.txt
+prompt.json
+*.log

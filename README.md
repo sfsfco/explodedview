@@ -1,0 +1,181 @@
+# explodedview
+
+Turn a technical drawing, CAD screenshot, or equipment photo into a professional
+exploded-view illustration — on MiniMax Code, Claude Code, Codex, or the Gemini
+CLI.
+
+```
+source assembly → identify components → separate → align to assembly axes
+→ show assembly relationships → label → professional exploded view
+```
+
+## Compatibility is two axes, not one
+
+Most skill READMEs say "works with Claude/Gemini/GPT" and mean it. This one does
+not, because the honest answer splits in two:
+
+- **Host** — the agent that reads the skill. Needs a shell and file access.
+- **Image model** — whatever actually draws the picture.
+
+Those are independent. You can run this skill in Claude Code, but Claude cannot
+draw: **Anthropic offers no image-generation API.** In a Claude host, Claude
+reads the drawing and writes the prompt; Gemini or OpenAI draws it. That is not a
+workaround, it is just how the vendors are set up, and hiding it would only
+mean you find out after a long run.
+
+| Host | Runs the skill | Draws | Needs |
+|---|---|---|---|
+| MiniMax Code | yes | yes, via `mcode-tools` connector | nothing extra |
+| Gemini CLI | yes | yes, same key | `GEMINI_API_KEY` |
+| Codex CLI | yes | no | `OPENAI_API_KEY` or `GEMINI_API_KEY` |
+| Claude Code | yes | **no** | `GEMINI_API_KEY` or `OPENAI_API_KEY` |
+| ChatGPT app | **no** — no shell | — | — |
+| Any agent with a shell | yes | via key | one of the above |
+
+`generate.py` refuses to pretend otherwise. `--provider anthropic` prints why it
+is unsupported instead of failing obscurely.
+
+## Install
+
+The skill is `skills/explodedview/`. Copy or symlink it into your host's skills
+directory:
+
+```bash
+git clone https://github.com/<you>/explodedview.git
+cd explodedview
+
+# MiniMax Code
+ln -s "$PWD/skills/explodedview" ~/.minimax/skills/explodedview
+
+# Claude Code
+ln -s "$PWD/skills/explodedview" ~/.claude/skills/explodedview
+
+# Gemini CLI
+ln -s "$PWD/skills/explodedview" ~/.gemini/skills/explodedview
+```
+
+Exact per-host paths for Codex, Claude Code, and the Gemini CLI are stated in
+`skills/explodedview/references/`, flagged where they need checking against your
+version. The MiniMax Code path is verified.
+
+## Use
+
+Just ask for it, or invoke `/explodedview` where the host supports slash
+commands:
+
+> Here's the GA drawing for the surge drum. Explode it and label the internals.
+
+Under the hood the agent does four things:
+
+1. **Reads the drawing** and identifies components, following the
+   engineering-fidelity rules in `SKILL.md`.
+2. **Writes the prompt** to a file — never inline, because long prompts with
+   quotes and commas break shells.
+3. **Runs `scripts/generate.py`**, which picks a provider, calls it, and writes
+   the file.
+4. **Shows you the image** and names anything it inferred rather than read.
+
+## Why there is a script at all
+
+The original version of this skill told the model to run `mcode-tools` itself,
+including hard-won warnings like *"the node_id is not a URL"* and *"write
+arguments to a JSON file to avoid shell quoting problems."*
+
+Those warnings are scar tissue, and they are the wrong fix. An LLM is bad at
+CLI plumbing — quoting, JSON envelopes, ID-versus-URL confusions — and prompting
+harder does not help. Moving the plumbing into a deterministic script does:
+
+```bash
+python3 scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
+```
+
+The agent's job shrinks to the part it is actually good at: deciding which
+components exist, which way they travel, and how they are coloured. The tool
+invocation becomes a file that is correct by construction.
+
+`generate.py` is stdlib-only. No `pip install`, no lockfile, no virtualenv.
+
+## Safety rails
+
+**A dropped reference image fails loudly.** If you pass `--reference` to a
+provider that cannot accept source images, the script raises instead of
+generating from text alone. The failure mode it prevents is the worst one
+imagineable for this skill: a confident-looking exploded view of a machine that
+was never in the prompt.
+
+**Unparseable responses say so.** Vendor response formats are parsed defensively
+and, when nothing image-shaped turns up, the error includes the response shape
+it actually saw — so a vendor changing their format is a five-second diagnosis
+rather than a debugging session.
+
+**Inferred components get flagged.** Every host adapter requires the agent to
+name what it guessed. In an exploded view, an invented nozzle is the kind of
+error an engineer will not catch by looking.
+
+## Development
+
+```bash
+python3 -m unittest discover -s tests -v   # 29 tests
+python3 skills/explodedview/scripts/generate.py --list
+```
+
+### What is verified, and what is not
+
+Worth reading before you rely on it:
+
+**Verified by the test suite**
+- Request shapes for all three providers, byte-for-byte against the docs
+- Response parsing across four different vendor payload shapes
+- The reference guard refuses to drop a source image
+- Provider auto-detection, and that it never selects Anthropic
+- `--dry-run` performs no network I/O
+
+**Verified working end to end**
+- MiniMax Code + `mcode-tools`: the original path, unchanged in behaviour
+
+**Not verified against a live API call**
+- Gemini and OpenAI response parsing. The *request* shapes are taken from
+  official documentation; the *responses* were never exercised, because no API
+  keys were available when this was built. `providers/base.py` parses
+  defensively to absorb that, but treat first contact as unproven and run
+  `--dry-run` first.
+
+If you have a key and want to close that gap, a PR adding a live integration
+test would be the most useful contribution here.
+
+## Layout
+
+```
+explodedview/
+├── README.md
+├── LICENSE                      MIT
+├── skills/explodedview/
+│   ├── SKILL.md                 portable core — all domain logic
+│   ├── references/              one adapter per host
+│   │   ├── mcode.md             verified
+│   │   ├── claude-code.md
+│   │   ├── codex.md
+│   │   ├── gemini-cli.md
+│   │   └── generic.md
+│   └── scripts/
+│       ├── generate.py          CLI entry point
+│       └── providers/
+│           ├── base.py          stdlib plumbing, defensive parsing
+│           ├── gemini.py        Nano Banana
+│           ├── openai.py        gpt-image-1
+│           └── mcode.py         MiniMax connector via CLI
+└── tests/test_providers.py
+```
+
+`SKILL.md` is host-agnostic and contains no tool names. The host loads it, then
+opens exactly one file in `references/` — the one matching itself.
+
+## Contributing
+
+Open an issue with a drawing that produced a bad result, and ideally the image.
+Failure cases are more useful than feature requests here; the rules in
+`SKILL.md` are the thing most worth sharpening.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
