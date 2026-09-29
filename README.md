@@ -41,9 +41,9 @@ not, because the honest answer splits in two:
 
 Those are independent. You can run this skill in Claude Code, but Claude cannot
 draw: **Anthropic offers no image-generation API.** In a Claude host, Claude
-reads the drawing and writes the prompt; Gemini, OpenAI or MiniMax draws it. That is not a
-workaround, it is just how the vendors are set up, and hiding it would only
-mean you find out after a long run.
+reads the drawing and writes the prompt; Gemini, OpenAI or MiniMax draws it.
+That is not a workaround, it is just how the vendors are set up, and hiding it
+would only mean you find out after a long run.
 
 | Host | Runs the skill | Draws | Needs |
 |---|---|---|---|
@@ -107,7 +107,8 @@ Under the hood the agent does four things:
    quotes and commas break shells.
 3. **Runs `scripts/generate.py`**, which picks a provider, calls it, and writes
    the file.
-4. **Shows you the image** and names anything it inferred rather than read.
+4. **Checks the image against the source, then shows it to you**, naming
+   anything it inferred rather than read.
 
 ## Why there is a script at all
 
@@ -211,7 +212,8 @@ explodedview/
 ```
 
 `SKILL.md` is host-agnostic and contains no tool names. The host loads it, then
-opens exactly one file in `references/` — the one matching itself.
+opens the one file in `references/` that matches itself (plus
+`minimax-api.md` when a MiniMax model runs in a non-MiniMax host).
 
 ## Contributing
 
