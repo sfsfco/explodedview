@@ -6,6 +6,10 @@ authenticated in the host you are running in, because it needs no extra setup.
 `mcode` is first because inside MiniMax Code the connector is already wired up,
 so requiring a GEMINI_API_KEY or OPENAI_API_KEY would be a pointless
 regression for the host this skill was written in.
+
+`minimax` (the HTTP API) is last: it cannot take the source drawing as a
+reference and caps prompts at 1500 characters, so any other available
+provider will produce a more faithful exploded view.
 """
 
 from __future__ import annotations
@@ -20,10 +24,16 @@ from .base import (
 )
 from .gemini import GeminiProvider
 from .mcode import McodeProvider
+from .minimax import MiniMaxProvider
 from .openai import OpenAIProvider
 
 #: Ordered by auto-detection preference.
-PROVIDERS: list[Provider] = [McodeProvider(), GeminiProvider(), OpenAIProvider()]
+PROVIDERS: list[Provider] = [
+    McodeProvider(),
+    GeminiProvider(),
+    OpenAIProvider(),
+    MiniMaxProvider(),
+]
 
 BY_NAME: dict[str, Provider] = {p.name: p for p in PROVIDERS}
 
@@ -33,8 +43,8 @@ NO_IMAGE_SUPPORT = {
     "anthropic": (
         "Anthropic does not offer an image-generation API - Claude models "
         "cannot produce raster images. In a Claude host, use this skill to "
-        "write the prompt, then generate with --provider gemini or "
-        "--provider openai."
+        "write the prompt, then generate with --provider gemini, openai "
+        "or minimax."
     ),
 }
 
@@ -64,11 +74,10 @@ def resolve(name: str, req: GenerationRequest | None = None) -> Provider:
         provider = get(key)
         if not provider.available():
             if provider.env_key:
-                raise ProviderError(
-                    f"{provider.name}: {provider.env_key} is not set and "
-                    f"mcode-tools is not on PATH. Nothing to generate with."
-                )
-            raise ProviderError(f"{provider.name} is not available in this environment.")
+                raise ProviderError(f"{provider.name}: {provider.env_key} is not set.")
+            raise ProviderError(
+                f"{provider.name}: mcode-tools is not on PATH (it ships with MiniMax Code)."
+            )
         return provider
 
     available = detect()
@@ -78,6 +87,7 @@ def resolve(name: str, req: GenerationRequest | None = None) -> Provider:
             "  - mcode-tools on PATH (MiniMax Code)\n"
             "  - GEMINI_API_KEY set (Gemini / Nano Banana)\n"
             "  - OPENAI_API_KEY set (gpt-image-1)\n"
+            "  - MINIMAX_API_KEY set (MiniMax image-01, text-only)\n"
             "Anthropic keys are intentionally not supported: Claude cannot "
             "generate images."
         )

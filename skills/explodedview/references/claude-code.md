@@ -17,10 +17,10 @@ than discovering it after a long run. The division of labour:
 So in a Claude host you need a *second* key for the drawing step:
 
 ```bash
-export GEMINI_API_KEY=...   # or OPENAI_API_KEY
+export GEMINI_API_KEY=...   # or OPENAI_API_KEY; MINIMAX_API_KEY works but is text-only
 ```
 
-If neither is set, `generate.py` exits with a message saying so instead of
+If none is set, `generate.py` exits with a message saying so instead of
 failing somewhere deep.
 
 ## Install
@@ -40,23 +40,32 @@ ln -s "$PWD/skills/explodedview" ~/.claude/skills/explodedview
 ## Generating
 
 ```bash
-python3 scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
+python3 <skill-dir>/scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
 ```
 
-`--provider auto` will select `gemini` if `GEMINI_API_KEY` is set, otherwise
-`openai`. It will never select Anthropic.
+`--provider auto` picks the first available of `gemini`, `openai`, `minimax`,
+preferring one that can take the source image. It will never select Anthropic.
+
+Claude Code sets the skill's base directory when it loads the skill; use it
+for `<skill-dir>`.
+
+**Running a MiniMax model inside Claude Code** (via `ANTHROPIC_BASE_URL`)? Read
+`minimax-api.md` as well: the model may not be able to see images, and a
+MiniMax key alone draws without the source image.
 
 Inspect what will be sent without sending it:
 
 ```bash
-python3 scripts/generate.py --prompt-file prompt.txt --provider gemini --dry-run
+python3 <skill-dir>/scripts/generate.py --prompt-file prompt.txt --provider gemini --dry-run
 ```
 
 ## Delivering the result
 
-Verify the file exists (`test -f exploded.png`), then reference its absolute
-path in the reply so Claude Code renders it inline. Follow with a sentence
-naming each component you inferred rather than read from the source.
+Verify the file exists (`test -f exploded.png`), then open it with the Read
+tool so you actually see the result and can compare it with the source. Don't
+count on the image showing up inline in the conversation: give its absolute
+path as a clickable link and say plainly that the file is there. Follow with a
+sentence naming each component you inferred rather than read from the source.
 
 ---
 

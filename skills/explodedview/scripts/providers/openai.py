@@ -9,18 +9,18 @@ time; `status` below is the single source of truth for that.
 from __future__ import annotations
 
 import json
-import mimetypes
 import os
 import uuid
-from pathlib import Path
 from typing import Any
 
 from .base import (
     GenerationRequest,
     Provider,
     ProviderError,
+    describe_reference,
     extract_image_bytes,
     http_json,
+    read_reference,
 )
 
 GENERATIONS_URL = "https://api.openai.com/v1/images/generations"
@@ -28,8 +28,14 @@ EDITS_URL = "https://api.openai.com/v1/images/edits"
 
 DEFAULT_MODEL = "gpt-image-1"
 
-#: Sizes gpt-image-1 accepts. `auto` lets the model choose.
-VALID_SIZES = ("auto", "1024x1024", "1536x1024", "1024x1536")
+#: The only aspect ratios gpt-image-1 can honour, mapped to its real sizes.
+ASPECT_TO_SIZE = {
+    "1:1": "1024x1024",
+    "3:2": "1536x1024",
+    "16:9": "1536x1024",
+    "2:3": "1024x1536",
+    "9:16": "1024x1536",
+}
 
 
 class OpenAIProvider(Provider):
@@ -48,12 +54,11 @@ class OpenAIProvider(Provider):
     def _size(self, req: GenerationRequest) -> str | None:
         if not req.aspect_ratio:
             return None
-        mapping = {"1:1": "1024x1024", "3:2": "1536x1024", "16:9": "1536x1024", "2:3": "1024x1536", "9:16": "1024x1536"}
-        size = mapping.get(req.aspect_ratio)
+        size = ASPECT_TO_SIZE.get(req.aspect_ratio)
         if not size:
             raise ProviderError(
                 f"openai: gpt-image-1 has no size for aspect ratio {req.aspect_ratio!r}. "
-                f"Pass one of {', '.join(VALID_SIZES)} via --size, or omit it."
+                f"Use one of {', '.join(ASPECT_TO_SIZE)} with --aspect-ratio, or omit it."
             )
         return size
 
@@ -75,7 +80,7 @@ class OpenAIProvider(Provider):
                     "model": model,
                     "prompt": req.prompt,
                     "size": self._size(req),
-                    "images": [str(Path(p)) for p in req.local_references()],
+                    "image[]": [describe_reference(ref) for ref in req.references],
                 },
             }
         body: dict[str, Any] = {"model": model, "prompt": req.prompt}
@@ -120,14 +125,14 @@ class OpenAIProvider(Provider):
         if size:
             add_field("size", size)
 
-        for path in req.local_references():
-            p = Path(path)
-            mime = mimetypes.guess_type(p.name)[0] or "image/png"
+        for index, ref in enumerate(req.references):
+            data, mime = read_reference(ref, timeout=req.timeout)
+            filename = f"reference-{index}.{mime.rsplit('/', 1)[-1]}"
             chunks.append(
                 f"--{boundary}\r\n".encode()
-                + f'Content-Disposition: form-data; name="image[]"; filename="{p.name}"\r\n'.encode()
+                + f'Content-Disposition: form-data; name="image[]"; filename="{filename}"\r\n'.encode()
                 + f"Content-Type: {mime}\r\n\r\n".encode()
-                + p.read_bytes()
+                + data
                 + b"\r\n"
             )
 
@@ -138,31 +143,5 @@ class OpenAIProvider(Provider):
             "Authorization": f"Bearer {self._require_key()}",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
         }
-        payload = http_json_raw(EDITS_URL, request_headers, body, timeout=req.timeout)
+        payload = http_json(EDITS_URL, request_headers, body, timeout=req.timeout)
         return extract_image_bytes(payload)
-
-
-def http_json_raw(url: str, headers: dict[str, str], body: bytes, timeout: int):
-    """POST a non-JSON (multipart) body and decode a JSON response."""
-    import urllib.error
-    import urllib.request
-
-    from .base import ProviderError as _PE
-
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = ""
-        try:
-            detail = exc.read().decode("utf-8", "replace")[:600]
-        except Exception:
-            pass
-        raise _PE(f"POST {url} -> HTTP {exc.code}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise _PE(f"POST {url} -> {exc.reason}") from exc
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise _PE(f"Response was not JSON: {raw[:400]!r}") from exc

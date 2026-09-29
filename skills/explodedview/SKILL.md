@@ -25,6 +25,8 @@ The exploded view must help an engineer, technician, manufacturer, or client und
 
 First analyze the provided image carefully.
 
+**You must actually see the image.** If your model cannot read images (some text-only coding models cannot), use an image-understanding tool your host provides — for example `understand_image` from the MiniMax MCP server — and base the analysis on its answer. If no such tool exists, stop and tell the user; never infer an assembly from a filename or a guess.
+
 Identify:
 
 - Main assembly
@@ -182,6 +184,8 @@ Everything above is host-agnostic. This section is where the illustration is act
 
 **Describing the illustration is not producing it.** Call a generator, then show the returned image to the user. A written description is not a deliverable.
 
+**Paths.** `scripts/generate.py` below is relative to this skill's own directory (the folder containing this SKILL.md), not to the user's working directory. Resolve it to an absolute path first — e.g. `python3 /abs/path/to/explodedview/scripts/generate.py` — and keep `prompt.txt` and the output in the user's working directory.
+
 ## Step 1 — Build the prompt
 
 Assemble the prompt from the sections above. It must state:
@@ -192,11 +196,15 @@ Assemble the prompt from the sections above. It must state:
 - Explicitly: no text, no labels, no callouts, no watermarks in the image.
 - The visual style and background.
 
+Keep it under 1,500 characters if the run may use the `minimax` provider — that API rejects anything longer. The other providers accept much longer prompts.
+
 **Write the prompt to a file. Never inline it into a shell command.** Long prompts contain quotes, commas, colons and newlines; inlining them is the single most common cause of a failed generation. Use `prompt.txt` or `prompt.json`.
 
 ## Step 2 — Prepare the source image
 
-Most providers take reference images as HTTPS URLs, not local paths. If the source is a local, pasted or attached file, upload it first and use the returned URL.
+Pass the source to the generator as `--reference`, either a local file path or an http(s) URL. Do not upload it yourself — the script encodes or uploads it in whatever form the provider needs. A reference that does not exist, or a provider that cannot accept one, stops the run with an error rather than silently generating from text alone.
+
+If the source was pasted or attached rather than saved, write it to a file first so it has a path.
 
 **When the input is a full drawing sheet, crop it before generating.** A whole fabrication package passed as one image tends to reproduce the sheet layout, title block and data tables instead of exploding the assembly. Crop to the 3D or isometric view, and crop the section view separately when one is present, then pass both as separate references so hidden geometry is honoured.
 
@@ -205,41 +213,46 @@ Most providers take reference images as HTTPS URLs, not local paths. If the sour
 Use the bundled generator. It handles provider selection, the API call, and the download, so the host never has to hand-assemble a CLI invocation:
 
 ```bash
-python3 scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
+python3 <skill-dir>/scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
 ```
 
 Provider auto-detection order, overridable with `--provider`:
 
-| `--provider` | Requires |
-|---|---|
-| `mcode` | `mcode-tools` on PATH (MiniMax Code) |
-| `gemini` | `GEMINI_API_KEY` |
-| `openai` | `OPENAI_API_KEY` |
-| `auto` | first available from the list above |
+| `--provider` | Requires | Takes the source image? |
+|---|---|---|
+| `mcode` | `mcode-tools` on PATH (MiniMax Code) | yes |
+| `gemini` | `GEMINI_API_KEY` | yes |
+| `openai` | `OPENAI_API_KEY` | yes |
+| `minimax` | `MINIMAX_API_KEY` (+ `MINIMAX_API_HOST=https://api.minimaxi.com` for mainland China) | **no** — text only, prompt ≤ 1,500 chars |
+| `auto` | first available from the list above, preferring one that takes the source image | |
+
+`minimax` cannot use the drawing as a reference: the MiniMax API only accepts face references. With only a `MINIMAX_API_KEY`, either describe the geometry completely in the prompt and drop `--reference`, or tell the user a Gemini or OpenAI key will give a far more faithful result.
 
 ```bash
 # force a provider
-python3 scripts/generate.py --provider gemini --prompt-file prompt.txt --out exploded.png
+python3 <skill-dir>/scripts/generate.py --provider gemini --prompt-file prompt.txt --out exploded.png
 ```
 
-> **Anthropic models cannot generate images.** There is no Anthropic image-generation endpoint. If you are running in a Claude host, the host writes the prompt and `generate.py` draws it using a Gemini or OpenAI key. `generate.py` exits with a clear message rather than failing obscurely. See `references/claude-code.md`.
+> **Anthropic models cannot generate images.** There is no Anthropic image-generation endpoint. If you are running in a Claude host, the host writes the prompt and `generate.py` draws it using another provider's key. `generate.py` exits with a clear message rather than failing obscurely. See `references/claude-code.md`.
 
-Run `python3 scripts/generate.py --help` for all flags.
+Run `python3 <skill-dir>/scripts/generate.py --help` for all flags, and `--list` to see which providers are available.
 
 ## Step 4 — Show the result
 
 **Delivery is not optional. A generated image that is never surfaced is a failed run.**
 
 1. Confirm the output file exists on disk (`test -f <path>`).
-2. Embed it in your reply using your host's media syntax.
-3. Follow it with a plain statement of what the image shows.
-4. Name every component you *inferred* rather than read directly off the source, and flag anything uncertain.
+2. **Look at it.** Open the generated image with your image-reading tool (or the image-understanding tool from Input Analysis) and compare it with the source. Describe what is actually in the picture, not what the prompt asked for. If it dropped, invented or misplaced a major component, say so, or regenerate.
+3. Embed it in your reply using your host's media syntax.
+4. Follow it with a plain statement of what the image shows.
+5. Name every component you *inferred* rather than read directly off the source, and flag anything uncertain.
 
 Host-specific delivery syntax is in `references/`. Read only the file matching your host:
 
 | Your host | Read |
 |---|---|
 | MiniMax Code | `references/mcode.md` |
+| A MiniMax model in any other host (Claude Code, OpenCode, Cline, …) | `references/minimax-api.md` |
 | Claude Code | `references/claude-code.md` |
 | Codex / OpenAI | `references/codex.md` |
 | Gemini CLI | `references/gemini-cli.md` |
@@ -266,7 +279,7 @@ ALIGN COMPONENTS WITH ASSEMBLY AXES
         ↓
 SHOW ASSEMBLY RELATIONSHIPS
         ↓
-LABEL MAJOR COMPONENTS
+NUMBER MAJOR COMPONENTS (parts list in the reply, not text in the image)
         ↓
 PRODUCE PROFESSIONAL EXPLODED VIEW
 ```

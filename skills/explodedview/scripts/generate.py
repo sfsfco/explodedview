@@ -50,6 +50,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  mcode    MiniMax Code connector, needs mcode-tools on PATH\n"
             "  gemini   Nano Banana, needs GEMINI_API_KEY\n"
             "  openai   gpt-image-1, needs OPENAI_API_KEY\n"
+            "  minimax  MiniMax image-01, needs MINIMAX_API_KEY (text-only,\n"
+            "           prompt <= 1500 chars; MINIMAX_API_HOST for the China endpoint)\n"
             "\n"
             "Anthropic is deliberately absent: Claude cannot generate images.\n"
         ),
@@ -62,16 +64,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="PATH_OR_URL",
-        help="Source image to condition on. Repeatable. "
-             "Not all providers accept references; the script fails loudly rather "
-             "than dropping them.",
+        help="Source image to condition on: a local path or an http(s) URL. "
+             "Repeatable. A missing file, or a provider that cannot accept "
+             "references, is an error - never silently dropped.",
     )
     parser.add_argument("--out", default="exploded.png", help="Output image path.")
     parser.add_argument(
         "--provider",
         default="auto",
-        help="auto (default), mcode, gemini, openai. Or anthropic to see why it "
-             "is not supported.",
+        help="auto (default), mcode, gemini, openai, minimax. Or anthropic to see "
+             "why it is not supported.",
     )
     parser.add_argument("--model", help="Override the provider's default image model.")
     parser.add_argument("--aspect-ratio", help="e.g. 16:9, 4:3, 1:1.")
@@ -116,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
             aspect_ratio=args.aspect_ratio,
             timeout=args.timeout,
         )
+        req.validate_references()
         provider = resolve(args.provider, req)
     except ProviderError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -123,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         try:
+            provider.guard_references(req)
             spec = provider.build_spec(req)
         except ProviderError as exc:
             print(f"error: {exc}", file=sys.stderr)

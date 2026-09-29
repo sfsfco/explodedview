@@ -7,15 +7,16 @@ behalf, so no API key is needed.
 Step order (matches the MiniMax Code runtime):
 
 1. `mcode-tools upload_temp_url <path> --mime-type <mime>`  -> temp_url
+   (local references only; http(s) references are passed through as-is)
 2. `mcode-tools connector call connector__matrix__generate_image --args-file <f>`
    -> success_items[].node_id
 3. `mcode-tools get_asset_url <node_id>`                     -> download_url
 4. GET download_url
 
 PAYLOAD CAVEAT: step 2 requires the arguments to be wrapped in a `requests`
-array, but the exact inner field names are not part of any public schema. The
-defaults below are a best guess. If the connector rejects them, pass your own
-with --args-json and you will not need to touch this file.
+array, but the exact inner field names (`prompt`, `reference_images`) are not
+part of any public schema and have not been confirmed against the connector.
+If it rejects them, `_args_payload` is the only place to change.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from .base import (
     ProviderError,
     guess_mime_for_path,
     http_get_bytes,
+    is_url,
 )
 
 CONNECTOR = "connector__matrix__generate_image"
@@ -44,7 +46,7 @@ class McodeProvider(Provider):
     env_key = None
     default_model = "(connector-managed)"
     supports_references = True
-    status = "verified working in MiniMax Code; connector arg field names are best-effort"
+    status = "CLI flow verified by hand in MiniMax Code; connector arg field names unconfirmed"
 
     def available(self) -> bool:
         return shutil.which("mcode-tools") is not None
@@ -54,12 +56,15 @@ class McodeProvider(Provider):
             "provider": self.name,
             "requires": "mcode-tools on PATH",
             "steps": [
-                f"mcode-tools upload_temp_url <path> --mime-type image/png  (x{len(req.references)})",
+                "mcode-tools upload_temp_url <path> --mime-type <mime>  "
+                f"(x{sum(not is_url(r) for r in req.references)} local references)",
                 f"mcode-tools connector call {CONNECTOR} --args-file <tmp.json>",
                 "mcode-tools get_asset_url <node_id>",
                 "GET <download_url>",
             ],
-            "args_file_shape": self._args_payload(req, []),
+            "args_file_shape": self._args_payload(
+                req, [r if is_url(r) else f"<temp_url for {r}>" for r in req.references]
+            ),
         }
 
     def _args_payload(self, req: GenerationRequest, ref_urls: list[str]) -> dict[str, Any]:
@@ -138,9 +143,10 @@ class McodeProvider(Provider):
         return url
 
     def generate(self, req: GenerationRequest) -> tuple[bytes, str]:
-        ref_urls: list[str] = []
-        for path in req.local_references():
-            ref_urls.append(self._upload(Path(path), req.timeout))
+        ref_urls = [
+            ref if is_url(ref) else self._upload(Path(ref).expanduser(), req.timeout)
+            for ref in req.references
+        ]
 
         args_file = None
         try:

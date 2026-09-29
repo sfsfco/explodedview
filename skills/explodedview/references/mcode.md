@@ -22,7 +22,7 @@ git checkout elsewhere means an update can never clobber your working tree.
 the `mcode` provider with no configuration:
 
 ```bash
-python3 scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
+python3 <skill-dir>/scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
 ```
 
 If you are running the mcode-tools CLI by hand instead of through the script,

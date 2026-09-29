@@ -1,8 +1,10 @@
 """Google Gemini / Nano Banana provider.
 
 Request shape verified against the official Gemini image-generation docs
-(https://ai.google.dev/gemini-api/docs/image-generation, page last updated
-2026-09-23) for the text-only `interactions` path. Response shape is parsed
+(https://ai.google.dev/gemini-api/docs/image-generation, checked 2026-09-29).
+Both text-only and reference-image requests go through the `interactions`
+endpoint: references are extra `{"type": "image"}` input blocks, and
+`response_format` (aspect ratio) applies either way. Response shape is parsed
 defensively by providers.base.extract_image_bytes.
 
 Note from those docs: Imagen is shut down and no longer served by the Gemini
@@ -13,22 +15,20 @@ from __future__ import annotations
 
 import base64
 import json
-from pathlib import Path
+import os
 from typing import Any
 
 from .base import (
     GenerationRequest,
     Provider,
     ProviderError,
+    describe_reference,
     extract_image_bytes,
-    guess_mime_for_path,
     http_json,
+    read_reference,
 )
 
 INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
-GENERATE_CONTENT_URL = (
-    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-)
 
 #: Nano Banana 2 - Google's recommended all-rounder for generation.
 DEFAULT_MODEL = "gemini-3.1-flash-image"
@@ -48,8 +48,6 @@ class GeminiProvider(Provider):
     status = "request shape doc-verified; response parsing unverified against a live call"
 
     def available(self) -> bool:
-        import os
-
         return bool(os.environ.get(self.env_key, "").strip())
 
     def _model(self, req: GenerationRequest) -> str:
@@ -61,18 +59,7 @@ class GeminiProvider(Provider):
             "Content-Type": "application/json",
         }
 
-    def build_spec(self, req: GenerationRequest) -> dict[str, Any]:
-        model = self._model(req)
-        if req.references:
-            return {
-                "provider": self.name,
-                "endpoint": "POST " + GENERATE_CONTENT_URL.format(model=model),
-                "note": "inline reference images path (generateContent)",
-                "auth_header": "x-goog-api-key",
-                "model": model,
-                "body": self._generate_content_body(req, model),
-            }
-        body: dict[str, Any] = {"model": model, "input": req.prompt}
+    def _body(self, req: GenerationRequest, image_blocks: list[dict[str, Any]]) -> dict[str, Any]:
         response_format: dict[str, Any] = {"type": "image"}
         if req.aspect_ratio:
             if req.aspect_ratio not in VALID_ASPECT_RATIOS:
@@ -81,44 +68,40 @@ class GeminiProvider(Provider):
                     f"Valid: {', '.join(VALID_ASPECT_RATIOS)}"
                 )
             response_format["aspect_ratio"] = req.aspect_ratio
-        body["response_format"] = response_format
+        if image_blocks:
+            model_input: Any = [{"type": "text", "text": req.prompt}, *image_blocks]
+        else:
+            model_input = req.prompt
+        return {
+            "model": self._model(req),
+            "input": model_input,
+            "response_format": response_format,
+        }
+
+    def build_spec(self, req: GenerationRequest) -> dict[str, Any]:
+        blocks = [
+            {"type": "image", "data": describe_reference(ref), "mime_type": "<sniffed>"}
+            for ref in req.references
+        ]
         return {
             "provider": self.name,
             "endpoint": "POST " + INTERACTIONS_URL,
-            "note": "text-only path (interactions) - shape from official docs",
             "auth_header": "x-goog-api-key",
-            "model": model,
-            "body": body,
-        }
-
-    def _generate_content_body(self, req: GenerationRequest, model: str) -> dict[str, Any]:
-        parts: list[dict[str, Any]] = [{"text": req.prompt}]
-        for path in req.local_references():
-            data = Path(path).read_bytes()
-            parts.append(
-                {
-                    "inline_data": {
-                        "mime_type": guess_mime_for_path(Path(path)),
-                        "data": base64.b64encode(data).decode("ascii"),
-                    }
-                }
-            )
-        return {
-            "contents": [{"parts": parts}],
-            "generationConfig": {"responseModalities": ["IMAGE"]},
+            "model": self._model(req),
+            "body": self._body(req, blocks),
         }
 
     def generate(self, req: GenerationRequest) -> tuple[bytes, str]:
-        spec = self.build_spec(req)
-        model = self._model(req)
-        if req.references:
-            url = GENERATE_CONTENT_URL.format(model=model)
-        else:
-            url = INTERACTIONS_URL
+        blocks = []
+        for ref in req.references:
+            data, mime = read_reference(ref, timeout=req.timeout)
+            blocks.append(
+                {"type": "image", "data": base64.b64encode(data).decode("ascii"), "mime_type": mime}
+            )
         payload = http_json(
-            url,
+            INTERACTIONS_URL,
             self._headers(),
-            json.dumps(spec["body"]).encode("utf-8"),
+            json.dumps(self._body(req, blocks)).encode("utf-8"),
             timeout=req.timeout,
         )
         return extract_image_bytes(payload)

@@ -54,16 +54,21 @@ class GenerationRequest:
     aspect_ratio: str | None = None
     timeout: int = 600
 
-    def local_references(self) -> list[Path]:
-        """References that are local files, as Paths. Remote URLs are skipped."""
-        out = []
+    def validate_references(self) -> None:
+        """Fail before any provider call if a reference cannot be read.
+
+        Every reference must be an http(s) URL or an existing local file. A
+        typo'd path must never degrade into a text-only generation.
+        """
         for ref in self.references:
-            p = Path(ref)
-            if not p.exists():
+            if is_url(ref):
                 continue
-            if p.is_file():
-                out.append(p)
-        return out
+            path = Path(ref).expanduser()
+            if not path.is_file():
+                raise ProviderError(
+                    f"Reference {ref!r} is not an existing file or an http(s) URL. "
+                    f"Refusing to generate without it."
+                )
 
 
 class Provider:
@@ -97,8 +102,9 @@ class Provider:
         if req.references and not self.supports_references:
             raise ReferenceUnsupported(
                 f"Provider {self.name!r} cannot accept source reference images. "
-                f"Drop --reference, or use --provider mcode (MiniMax Code) or "
-                f"openai. Refusing to generate silently from text alone."
+                f"Either pick a provider that can (see --list), or drop --reference "
+                f"and describe the geometry fully in the prompt. "
+                f"Refusing to generate silently from text alone."
             )
 
     def _require_key(self) -> str:
@@ -125,7 +131,7 @@ def http_json(
     body: bytes,
     timeout: int = 600,
 ) -> Any:
-    """POST JSON and decode the response as JSON."""
+    """POST a body (JSON or multipart - caller sets Content-Type) and decode JSON."""
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     return _send(request, timeout, url)
 
@@ -200,16 +206,23 @@ def iter_base64_candidates(obj: Any, _key: str | None = None):
 def extract_image_bytes(payload: Any) -> tuple[bytes, str]:
     """Pull image bytes out of a decoded JSON response.
 
+    Returns the *last* image found: Gemini may emit interim images before the
+    final render, and Google's own SDK treats the last image block as the
+    result. Single-image responses are unaffected.
+
     Raises ProviderError with a shape summary rather than a bare IndexError /
     KeyError, so a vendor shape change is diagnosable from the message alone.
     """
+    found: tuple[bytes, str] | None = None
     for _key, b64 in iter_base64_candidates(payload):
         try:
             raw = base64.b64decode(b64, validate=False)
         except (ValueError, TypeError):
             continue
         if len(raw) > 1024:  # reject anything too small to be a real image
-            return raw, _guess_mime(raw)
+            found = (raw, _guess_mime(raw))
+    if found:
+        return found
     raise ProviderError(
         "No image data found in the provider response. "
         f"Top-level shape was: {_describe_shape(payload)}. "
@@ -217,26 +230,23 @@ def extract_image_bytes(payload: Any) -> tuple[bytes, str]:
     )
 
 
-def decode_b64_to_file(b64: str, out: Path) -> Path:
-    raw = base64.b64decode(b64, validate=False)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_bytes(raw)
-    return out
-
-
 # --------------------------------------------------------------------------
 # Small helpers
 # --------------------------------------------------------------------------
 
 
-def _guess_mime(raw: bytes) -> str:
+def _sniff_mime(raw: bytes) -> str | None:
     if raw[:3] == b"\xff\xd8\xff":
         return "image/jpeg"
     if raw[:8] == b"\x89PNG\r\n\x1a\n":
         return "image/png"
     if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
         return "image/webp"
-    return "image/png"
+    return None
+
+
+def _guess_mime(raw: bytes) -> str:
+    return _sniff_mime(raw) or "image/png"
 
 
 def _describe_shape(obj: Any, depth: int = 0) -> str:
@@ -258,6 +268,36 @@ def _describe_shape(obj: Any, depth: int = 0) -> str:
             return json.dumps(obj)
         return f"str({len(obj)})"
     return type(obj).__name__
+
+
+def is_url(ref: str) -> bool:
+    return ref.startswith(("https://", "http://"))
+
+
+def read_reference(ref: str, timeout: int = 300) -> tuple[bytes, str]:
+    """Load a reference image from a local path or an http(s) URL.
+
+    Raises rather than skipping: a reference that cannot be loaded must stop
+    the run, never be silently dropped.
+    """
+    if is_url(ref):
+        raw, header_mime = http_get_bytes(ref, {}, timeout=timeout)
+    else:
+        path = Path(ref).expanduser()
+        if not path.is_file():
+            raise ProviderError(f"Reference {ref!r} does not exist.")
+        raw, header_mime = path.read_bytes(), guess_mime_for_path(path)
+    # Trust the bytes over the extension/header when they are recognisable.
+    mime = _sniff_mime(raw) or header_mime.split(";")[0].strip()
+    return raw, mime
+
+
+def describe_reference(ref: str) -> str:
+    """Short placeholder used by --dry-run instead of megabytes of base64."""
+    if is_url(ref):
+        return f"<base64 of {ref}, fetched at send time>"
+    path = Path(ref).expanduser()
+    return f"<base64 of {path}, {path.stat().st_size} bytes>"
 
 
 def guess_mime_for_path(path: Path) -> str:

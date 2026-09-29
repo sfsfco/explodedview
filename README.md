@@ -1,8 +1,8 @@
 # explodedview
 
 Turn a technical drawing, CAD screenshot, or equipment photo into a professional
-exploded-view illustration — on MiniMax Code, Claude Code, Codex, or the Gemini
-CLI.
+exploded-view illustration — on MiniMax Code, Claude Code, Codex, the Gemini
+CLI, or any shell-capable agent running a MiniMax model.
 
 ```
 source assembly → identify components → separate → align to assembly axes
@@ -41,7 +41,7 @@ not, because the honest answer splits in two:
 
 Those are independent. You can run this skill in Claude Code, but Claude cannot
 draw: **Anthropic offers no image-generation API.** In a Claude host, Claude
-reads the drawing and writes the prompt; Gemini or OpenAI draws it. That is not a
+reads the drawing and writes the prompt; Gemini, OpenAI or MiniMax draws it. That is not a
 workaround, it is just how the vendors are set up, and hiding it would only
 mean you find out after a long run.
 
@@ -50,9 +50,21 @@ mean you find out after a long run.
 | MiniMax Code | yes | yes, via `mcode-tools` connector | nothing extra |
 | Gemini CLI | yes | yes, same key | `GEMINI_API_KEY` |
 | Codex CLI | yes | no | `OPENAI_API_KEY` or `GEMINI_API_KEY` |
-| Claude Code | yes | **no** | `GEMINI_API_KEY` or `OPENAI_API_KEY` |
+| Claude Code | yes | **no** | `GEMINI_API_KEY`, `OPENAI_API_KEY`, or `MINIMAX_API_KEY`* |
+| MiniMax model in another host (Claude Code, OpenCode, Cline…) | yes, if it can see images† | via key | any key above |
 | ChatGPT app | **no** — no shell | — | — |
 | Any agent with a shell | yes | via key | one of the above |
+
+\* MiniMax's image API (`image-01`) only accepts face references, so it cannot
+condition on your drawing: it draws from the prompt alone, capped at 1,500
+characters. It works, but Gemini or OpenAI will be far more faithful to the
+source. `generate.py` refuses a `--reference` with it rather than quietly
+ignoring the drawing.
+
+† The host model must be able to read the source image. If yours is
+text-only, the skill tells it to use an image-understanding tool such as the
+MiniMax MCP server's `understand_image`. See
+`skills/explodedview/references/minimax-api.md`.
 
 `generate.py` refuses to pretend otherwise. `--provider anthropic` prints why it
 is unsupported instead of failing obscurely.
@@ -119,10 +131,10 @@ invocation becomes a file that is correct by construction.
 
 ## Safety rails
 
-**A dropped reference image fails loudly.** If you pass `--reference` to a
-provider that cannot accept source images, the script raises instead of
-generating from text alone. The failure mode it prevents is the worst one
-imagineable for this skill: a confident-looking exploded view of a machine that
+**A dropped reference image fails loudly.** If a `--reference` path does not
+exist, or you pass one to a provider that cannot accept source images, the
+script stops, even in `--dry-run`, instead of generating from text alone. The failure mode it prevents is the worst one
+imaginable for this skill: a confident-looking exploded view of a machine that
 was never in the prompt.
 
 **Unparseable responses say so.** Vendor response formats are parsed defensively
@@ -137,7 +149,7 @@ error an engineer will not catch by looking.
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests -v   # 29 tests
+python3 -m unittest discover -s tests -v   # 47 tests
 python3 skills/explodedview/scripts/generate.py --list
 ```
 
@@ -146,17 +158,22 @@ python3 skills/explodedview/scripts/generate.py --list
 Worth reading before you rely on it:
 
 **Verified by the test suite**
-- Request shapes for all three providers, byte-for-byte against the docs
-- Response parsing across four different vendor payload shapes
-- The reference guard refuses to drop a source image
+- Request shapes for all four HTTP providers, byte-for-byte against the docs
+- Response parsing across the vendors' payload shapes, including MiniMax's
+  HTTP-200 `base_resp` errors
+- The reference guard refuses to drop a source image; a missing reference path
+  fails before any call; the real image bytes reach the request body
 - Provider auto-detection, and that it never selects Anthropic
 - `--dry-run` performs no network I/O
 
-**Verified working end to end**
-- MiniMax Code + `mcode-tools`: the original path, unchanged in behaviour
+**Verified by hand**
+- MiniMax Code + `mcode-tools`: the CLI flow (upload → connector call →
+  `get_asset_url` → download) from the original skill. The inner field names
+  the script puts in the connector payload (`prompt`, `reference_images`) are
+  not publicly documented and have not been confirmed.
 
 **Not verified against a live API call**
-- Gemini and OpenAI response parsing. The *request* shapes are taken from
+- Gemini, OpenAI and MiniMax response parsing. The *request* shapes are taken from
   official documentation; the *responses* were never exercised, because no API
   keys were available when this was built. `providers/base.py` parses
   defensively to absorb that, but treat first contact as unproven and run
@@ -177,6 +194,7 @@ explodedview/
 │   ├── SKILL.md                 portable core — all domain logic
 │   ├── references/              one adapter per host
 │   │   ├── mcode.md             verified
+│   │   ├── minimax-api.md       MiniMax model in any other host
 │   │   ├── claude-code.md
 │   │   ├── codex.md
 │   │   ├── gemini-cli.md
@@ -187,6 +205,7 @@ explodedview/
 │           ├── base.py          stdlib plumbing, defensive parsing
 │           ├── gemini.py        Nano Banana
 │           ├── openai.py        gpt-image-1
+│           ├── minimax.py       MiniMax image-01 over HTTP (text-only)
 │           └── mcode.py         MiniMax connector via CLI
 └── tests/test_providers.py
 ```

@@ -33,7 +33,7 @@ as canonical. The script is host-agnostic; only the path is version-specific.
 
 ```bash
 export OPENAI_API_KEY=...
-python3 scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
+python3 <skill-dir>/scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
 ```
 
 For gpt-image-1, `--aspect-ratio` maps to the model's three real sizes:

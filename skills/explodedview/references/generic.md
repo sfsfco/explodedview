@@ -11,20 +11,27 @@ requirements below.
 2. **One image provider credential**, from this list:
    - `GEMINI_API_KEY` — Nano Banana
    - `OPENAI_API_KEY` — gpt-image-1
+   - `MINIMAX_API_KEY` — MiniMax image-01, text only (cannot take the source
+     image; prompt ≤ 1,500 characters). See `minimax-api.md`.
    - or `mcode-tools` on PATH (works in any shell host, not just MiniMax Code)
+3. **A model that can see the source image**, or an image-understanding tool
+   to stand in for it. See Input Analysis in SKILL.md.
+
+`<skill-dir>` in the commands below is the directory containing SKILL.md.
 
 ## Run
 
 ```bash
-python3 scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
+python3 <skill-dir>/scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
 ```
 
-`--provider auto` picks whatever is available, in that order. To see what it
+`--provider auto` picks whatever is available, in the order `mcode`, `gemini`,
+`openai`, `minimax`, preferring one that takes the source image. To see what it
 would pick and what it would send, without spending anything:
 
 ```bash
-python3 scripts/generate.py --list
-python3 scripts/generate.py --prompt-file prompt.txt --dry-run
+python3 <skill-dir>/scripts/generate.py --list
+python3 <skill-dir>/scripts/generate.py --prompt-file prompt.txt --dry-run
 ```
 
 ## Deliver the image
@@ -33,7 +40,8 @@ This is the one part with no universal answer, because media embedding is a
 host feature, not a script feature. Whatever your host uses:
 
 1. Verify the file exists — `test -f <absolute-path>`.
-2. Surface it using your host's media syntax. If your host has none, give the
+2. Open it with your image-reading tool and check it against the source.
+   Then surface it using your host's media syntax. If your host has none, give the
    absolute path and say plainly that the file is at that path.
 3. Follow with a sentence describing what the image shows, and name every
    component you **inferred** rather than read directly off the source.

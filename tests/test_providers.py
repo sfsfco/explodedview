@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "skills" / "explodedview" / "scripts"))
@@ -31,9 +33,16 @@ from providers import (  # noqa: E402
     extract_image_bytes,
     resolve,
 )
+from providers import gemini as gemini_module  # noqa: E402
+from providers import minimax as minimax_module  # noqa: E402
+from providers import openai as openai_module  # noqa: E402
 from providers.gemini import INTERACTIONS_URL, GeminiProvider  # noqa: E402
 from providers.mcode import McodeProvider  # noqa: E402
+from providers.minimax import MiniMaxProvider  # noqa: E402
 from providers.openai import EDITS_URL, GENERATIONS_URL, OpenAIProvider  # noqa: E402
+
+#: Every env var that makes a provider "available". Tests clear all of them.
+PROVIDER_KEYS = ("GEMINI_API_KEY", "OPENAI_API_KEY", "MINIMAX_API_KEY")
 
 def make_png(width: int = 64, height: int = 64) -> bytes:
     """Build a real PNG large enough to clear the parser's size floor.
@@ -104,14 +113,44 @@ class TestGeminiRequestShape(unittest.TestCase):
         spec = self.p.build_spec(GenerationRequest(prompt="x", model="gemini-2.5-flash-image"))
         self.assertEqual(spec["body"]["model"], "gemini-2.5-flash-image")
 
-    def test_references_switch_to_inline_data_path(self):
+    def test_references_become_image_input_blocks(self):
         with tempfile_reference("ref.png") as ref:
             spec = self.p.build_spec(GenerationRequest(prompt="x", references=[ref]))
-        self.assertIn(":generateContent", spec["endpoint"])
-        parts = spec["body"]["contents"][0]["parts"]
-        self.assertEqual(parts[0]["text"], "x")
-        self.assertEqual(parts[1]["inline_data"]["mime_type"], "image/png")
-        base64.b64decode(parts[1]["inline_data"]["data"])  # must be valid base64
+        self.assertEqual(spec["endpoint"], "POST " + INTERACTIONS_URL)
+        blocks = spec["body"]["input"]
+        self.assertEqual(blocks[0], {"type": "text", "text": "x"})
+        self.assertEqual(blocks[1]["type"], "image")
+
+    def test_dry_run_spec_does_not_inline_megabytes_of_base64(self):
+        with tempfile_reference("ref.png") as ref:
+            spec = self.p.build_spec(GenerationRequest(prompt="x", references=[ref]))
+        self.assertIn(f"{len(PNG)} bytes", spec["body"]["input"][1]["data"])
+
+    def test_aspect_ratio_still_applies_with_references(self):
+        with tempfile_reference("ref.png") as ref:
+            spec = self.p.build_spec(
+                GenerationRequest(prompt="x", references=[ref], aspect_ratio="16:9")
+            )
+            with self.assertRaises(ProviderError):
+                self.p.build_spec(GenerationRequest(prompt="x", references=[ref], aspect_ratio="7:3"))
+        self.assertEqual(spec["body"]["response_format"]["aspect_ratio"], "16:9")
+
+    def test_generate_sends_the_real_image_bytes(self):
+        sent = {}
+
+        def fake_http_json(url, headers, body, timeout):
+            sent["url"], sent["body"] = url, json.loads(body)
+            return {"output": [{"type": "image", "data": b64_png()}]}
+
+        with tempfile_reference("ref.png") as ref, \
+                mock.patch.object(gemini_module, "http_json", fake_http_json), \
+                mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            raw, _ = self.p.generate(GenerationRequest(prompt="x", references=[ref]))
+        self.assertEqual(raw, PNG)
+        self.assertEqual(sent["url"], INTERACTIONS_URL)
+        block = sent["body"]["input"][1]
+        self.assertEqual(block["mime_type"], "image/png")
+        self.assertEqual(base64.b64decode(block["data"]), PNG)
 
 
 class TestOpenAIRequestShape(unittest.TestCase):
@@ -132,13 +171,86 @@ class TestOpenAIRequestShape(unittest.TestCase):
     def test_unmappable_aspect_ratio_explains_itself(self):
         with self.assertRaises(ProviderError) as ctx:
             self.p.build_spec(GenerationRequest(prompt="x", aspect_ratio="1:8"))
-        self.assertIn("gpt-image-1 has no size", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("gpt-image-1 has no size", message)
+        self.assertIn("--aspect-ratio", message)  # points at a flag that exists
+        self.assertNotIn("--size", message)
 
     def test_references_switch_to_multipart_edits(self):
         with tempfile_reference("ref.jpg") as ref:
             spec = self.p.build_spec(GenerationRequest(prompt="x", references=[ref]))
             self.assertEqual(spec["endpoint"], "POST " + EDITS_URL)
             self.assertIn("multipart/form-data", spec["note"])
+
+    def test_edits_upload_contains_the_image_bytes(self):
+        sent = {}
+
+        def fake_http_json(url, headers, body, timeout):
+            sent["url"], sent["headers"], sent["body"] = url, headers, body
+            return {"data": [{"b64_json": b64_png()}]}
+
+        with tempfile_reference("ref.png") as ref, \
+                mock.patch.object(openai_module, "http_json", fake_http_json), \
+                mock.patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}):
+            raw, _ = self.p.generate(GenerationRequest(prompt="x", references=[ref]))
+        self.assertEqual(raw, PNG)
+        self.assertEqual(sent["url"], EDITS_URL)
+        self.assertIn("multipart/form-data; boundary=", sent["headers"]["Content-Type"])
+        self.assertIn(b'name="image[]"', sent["body"])
+        self.assertIn(PNG, sent["body"])
+
+
+class TestMiniMaxRequestShape(unittest.TestCase):
+    """Locked to https://platform.minimax.io/docs/api-reference/image-generation-t2i."""
+
+    def setUp(self) -> None:
+        self.p = MiniMaxProvider()
+
+    def test_body_shape(self):
+        with mock.patch.dict(os.environ, {"MINIMAX_API_HOST": ""}):
+            spec = self.p.build_spec(GenerationRequest(prompt="exploded view", aspect_ratio="16:9"))
+        self.assertEqual(spec["endpoint"], "POST https://api.minimax.io/v1/image_generation")
+        body = spec["body"]
+        self.assertEqual(body["model"], "image-01")
+        self.assertEqual(body["prompt"], "exploded view")
+        self.assertEqual(body["response_format"], "base64")
+        self.assertEqual(body["aspect_ratio"], "16:9")
+        self.assertIs(body["prompt_optimizer"], False)  # prompt must reach the model verbatim
+
+    def test_china_host_override(self):
+        with mock.patch.dict(os.environ, {"MINIMAX_API_HOST": "https://api.minimaxi.com/"}):
+            spec = self.p.build_spec(GenerationRequest(prompt="x"))
+        self.assertEqual(spec["endpoint"], "POST https://api.minimaxi.com/v1/image_generation")
+
+    def test_prompt_over_1500_chars_fails_before_the_call(self):
+        with self.assertRaises(ProviderError) as ctx:
+            self.p.build_spec(GenerationRequest(prompt="x" * 1501))
+        self.assertIn("1500", str(ctx.exception))
+
+    def test_invalid_aspect_ratio_fails_loudly(self):
+        with self.assertRaises(ProviderError):
+            self.p.build_spec(GenerationRequest(prompt="x", aspect_ratio="5:4"))
+
+    def test_references_are_refused_not_dropped(self):
+        """image-01 references are faces only - it cannot condition on a drawing."""
+        with self.assertRaises(ReferenceUnsupported):
+            self.p.guard_references(GenerationRequest(prompt="x", references=["a.png"]))
+
+    def test_extracts_image_base64_shape(self):
+        payload = {"data": {"image_base64": [b64_png()]}, "base_resp": {"status_code": 0}}
+        with mock.patch.object(minimax_module, "http_json", lambda *a, **k: payload), \
+                mock.patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key"}):
+            raw, mime = self.p.generate(GenerationRequest(prompt="x"))
+        self.assertEqual(raw, PNG)
+        self.assertEqual(mime, "image/png")
+
+    def test_base_resp_error_on_http_200_is_surfaced(self):
+        payload = {"data": None, "base_resp": {"status_code": 1008, "status_msg": "insufficient balance"}}
+        with mock.patch.object(minimax_module, "http_json", lambda *a, **k: payload), \
+                mock.patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key"}):
+            with self.assertRaises(ProviderError) as ctx:
+                self.p.generate(GenerationRequest(prompt="x"))
+        self.assertIn("insufficient balance", str(ctx.exception))
 
 
 class TestResponseParsing(unittest.TestCase):
@@ -173,9 +285,41 @@ class TestResponseParsing(unittest.TestCase):
         self.assertIn("quota exceeded", message)  # shape is shown, so it is debuggable
         self.assertIn("status", message)
 
+    def test_returns_the_last_image_when_there_are_several(self):
+        """Gemini can emit interim images; the final render comes last."""
+        interim = base64.b64encode(make_png()).decode("ascii")
+        raw, _ = extract_image_bytes(
+            {"output": [{"type": "image", "data": interim}, {"type": "image", "data": b64_png()}]}
+        )
+        self.assertEqual(raw, PNG)
+
     def test_rejects_degenerate_payload(self):
         with self.assertRaises(ProviderError):
             extract_image_bytes({})
+
+
+class TestReferenceValidation(unittest.TestCase):
+    """A reference that cannot be loaded must stop the run, never vanish."""
+
+    def test_missing_file_is_an_error(self):
+        with self.assertRaises(ProviderError) as ctx:
+            GenerationRequest(prompt="x", references=["does-not-exist.pnf"]).validate_references()
+        self.assertIn("does-not-exist.pnf", str(ctx.exception))
+
+    def test_existing_file_and_url_pass(self):
+        with tempfile_reference("ref.png") as ref:
+            GenerationRequest(
+                prompt="x", references=[ref, "https://example.com/a.png"]
+            ).validate_references()
+
+    def test_url_reference_is_passed_to_mcode_not_dropped(self):
+        spec = McodeProvider().build_spec(
+            GenerationRequest(prompt="x", references=["https://example.com/a.png"])
+        )
+        self.assertEqual(
+            spec["args_file_shape"]["requests"][0]["reference_images"],
+            ["https://example.com/a.png"],
+        )
 
 
 class TestReferenceGuard(unittest.TestCase):
@@ -217,11 +361,17 @@ class TestProviderResolution(unittest.TestCase):
             if saved is not None:
                 os.environ["GEMINI_API_KEY"] = saved
 
+    def test_missing_key_error_does_not_mention_mcode(self):
+        with mock.patch.dict(os.environ, {"OPENAI_API_KEY": ""}):
+            with self.assertRaises(ProviderError) as ctx:
+                resolve("openai")
+        self.assertNotIn("mcode", str(ctx.exception))
+
     def test_auto_with_nothing_available_lists_the_requirements(self):
         import os
         import shutil
 
-        saved = {k: os.environ.pop(k, None) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY")}
+        saved = {k: os.environ.pop(k, None) for k in PROVIDER_KEYS}
         real_which = shutil.which
         shutil.which = lambda *_a, **_k: None
         try:
@@ -230,6 +380,7 @@ class TestProviderResolution(unittest.TestCase):
             message = str(ctx.exception)
             self.assertIn("GEMINI_API_KEY", message)
             self.assertIn("OPENAI_API_KEY", message)
+            self.assertIn("MINIMAX_API_KEY", message)
         finally:
             shutil.which = real_which
             for k, v in saved.items():
@@ -240,9 +391,10 @@ class TestProviderResolution(unittest.TestCase):
         import os
         import shutil
 
-        saved = {k: os.environ.pop(k, None) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY")}
+        saved = {k: os.environ.pop(k, None) for k in PROVIDER_KEYS}
         real_which = shutil.which
         os.environ["GEMINI_API_KEY"] = "test-key"
+        os.environ["MINIMAX_API_KEY"] = "test-key"
         shutil.which = lambda *_a, **_k: None
         try:
             chosen = resolve("auto", GenerationRequest(prompt="x", references=["a.png"]))
@@ -302,6 +454,27 @@ class TestCliDryRun(unittest.TestCase):
 
         generate = importlib.import_module("generate")
         self.assertEqual(generate.main(["--provider", "gemini", "--dry-run"]), 1)
+
+    def test_typo_in_reference_path_fails_even_in_dry_run(self):
+        import importlib
+
+        generate = importlib.import_module("generate")
+        with mock.patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
+            code = generate.main(
+                ["--prompt", "x", "--provider", "gemini", "--reference", "src.pnf", "--dry-run"]
+            )
+        self.assertEqual(code, 1)
+
+    def test_reference_with_text_only_provider_fails_in_dry_run(self):
+        import importlib
+
+        generate = importlib.import_module("generate")
+        with tempfile_reference("ref.png") as ref, \
+                mock.patch.dict(os.environ, {"MINIMAX_API_KEY": "test-key"}):
+            code = generate.main(
+                ["--prompt", "x", "--provider", "minimax", "--reference", ref, "--dry-run"]
+            )
+        self.assertEqual(code, 1)
 
     def test_list_succeeds(self):
         import importlib

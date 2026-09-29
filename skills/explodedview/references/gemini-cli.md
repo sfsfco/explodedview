@@ -21,7 +21,7 @@ ln -s "$PWD/skills/explodedview" ~/.gemini/skills/explodedview
 
 ```bash
 export GEMINI_API_KEY=...
-python3 scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
+python3 <skill-dir>/scripts/generate.py --prompt-file prompt.txt --reference src.png --out exploded.png
 ```
 
 `--provider auto` selects `gemini` when `mcode-tools` is absent.
@@ -35,10 +35,11 @@ family is the only option:
 |---|---|
 | `gemini-3.1-flash-image` | Default. Best balance of quality, cost, latency. |
 | `gemini-3-pro-image` | Complex instructions, professional asset work, up to 4K. |
-| `gemini-2.5-flash-image` | High volume, 1024px, cheapest. |
+| `gemini-3.1-flash-lite-image` | Fastest and cheapest current model; high volume. |
+| `gemini-2.5-flash-image` | Legacy; Google recommends moving off it. |
 
 ```bash
-python3 scripts/generate.py --model gemini-3-pro-image --prompt-file prompt.txt --out exploded.png
+python3 <skill-dir>/scripts/generate.py --model gemini-3-pro-image --prompt-file prompt.txt --out exploded.png
 ```
 
 Valid `--aspect-ratio` values: `1:1`, `2:3`, `3:2`, `3:4`, `4:3`, `4:5`, `5:4`,
